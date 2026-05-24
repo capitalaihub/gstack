@@ -43,6 +43,7 @@ import { inspectElement, modifyStyle, resetModifications, getModificationHistory
 // Bun.spawn used instead of child_process.spawn (compiled bun binaries
 // fail posix_spawn on all executables including /bin/bash)
 import { safeUnlink, safeUnlinkQuiet, safeKill } from './error-handling';
+import { readAgentRecord, killAgentByRecord, clearAgentRecord, agentRecordPath } from './terminal-agent-control';
 import { sanitizeBody, stripLoneSurrogateEscapes } from './sanitize';
 import { startSocksBridge, testUpstream, type BridgeHandle } from './socks-bridge';
 import { parseProxyConfig, toUpstreamConfig, ProxyConfigError } from './proxy-config';
@@ -207,31 +208,34 @@ export interface ServerConfig {
   beforeRoute?: (req: Request, surface: Surface, auth: TokenInfo | null) => Promise<Response | null>;
   /**
    * Whether gstack owns the lifecycle of the terminal-agent process and its
-   * discovery files (`<stateDir>/terminal-port`, `<stateDir>/terminal-internal-token`).
+   * discovery files (`<stateDir>/terminal-port`, `<stateDir>/terminal-internal-token`,
+   * `<stateDir>/terminal-agent-pid`).
    *
-   * When true (default), shutdown() runs three side effects:
-   *   1. `pkill -f terminal-agent\.ts`  — regex-broad, matches ANY process whose
-   *      command line contains `terminal-agent.ts` on this host (including
-   *      sibling gstack sessions). Pre-existing CLI behavior, not introduced by
-   *      this flag. Identity-based PID kill is a separate followup (see TODOS).
+   * When true (default), shutdown() runs four side effects:
+   *   1. Identity-based kill via `killAgentByRecord(readAgentRecord(stateDir))`
+   *      (v1.44+). Only signals the PID recorded by THIS daemon's agent.
+   *      Replaced the historical `pkill -f terminal-agent\.ts` regex that
+   *      matched sibling gstack sessions on the same host — see
+   *      terminal-agent-control.ts for rationale.
    *   2. `safeUnlinkQuiet(<stateDir>/terminal-port)`
    *   3. `safeUnlinkQuiet(<stateDir>/terminal-internal-token)`
+   *   4. `safeUnlinkQuiet(<stateDir>/terminal-agent-pid)` (the v1.44 record)
    *
    * This is correct for gstack's CLI path, which spawns `terminal-agent.ts` as
    * the producer of those files (see cli.ts:1037-1063).
    *
    * Embedders (gbrowser phoenix overlay, future hosts) that run their own PTY
    * server and write those files themselves should pass `false`. When `false`,
-   * the embedder owns BOTH the agent process AND both discovery files —
-   * terminal-agent.ts's own SIGTERM cleanup only removes `terminal-port`
-   * (see terminal-agent.ts:558), so the internal-token file is the embedder's
-   * full responsibility.
+   * the embedder owns BOTH the agent process AND all three discovery files.
+   * Note that terminal-agent.ts's own SIGTERM cleanup removes `terminal-port`
+   * and `terminal-agent-pid` (the agent writes both at boot), so embedders
+   * that pre-launch their own agent must ensure their cleanup matches.
    *
    * Polarity note: this differs from `xvfb?` and `proxyBridge?`, which gate by
    * the *presence* of a caller-owned handle (presence ⇒ don't close). This
    * field gates by an explicit boolean because there is no handle object —
    * the terminal-agent is started elsewhere (cli.ts), and shutdown's only
-   * reference is the regex-based pkill + the file paths.
+   * reference is the PID record + the file paths.
    */
   ownsTerminalAgent?: boolean;
 }
@@ -1319,14 +1323,20 @@ export function buildFetchHandler(cfg: ServerConfig): ServerHandle {
 
     console.log('[browse] Shutting down...');
     if (ownsTerminalAgent) {
+      // Identity-based kill (v1.44+). Replaces the v1.43- `pkill -f
+      // terminal-agent\.ts` regex teardown which matched sibling gstack
+      // sessions on the same host. Only the PID recorded in
+      // `<stateDir>/terminal-agent-pid` by THIS daemon's agent is signaled.
       try {
-        const { spawnSync } = require('child_process');
-        spawnSync('pkill', ['-f', 'terminal-agent\\.ts'], { stdio: 'ignore', timeout: 3000 });
+        const stateDir = path.dirname(config.stateFile);
+        const record = readAgentRecord(stateDir);
+        if (record) killAgentByRecord(record, 'SIGTERM');
       } catch (err: any) {
         console.warn('[browse] Failed to kill terminal-agent:', err.message);
       }
       safeUnlinkQuiet(path.join(path.dirname(config.stateFile), 'terminal-port'));
       safeUnlinkQuiet(path.join(path.dirname(config.stateFile), 'terminal-internal-token'));
+      safeUnlinkQuiet(agentRecordPath(path.dirname(config.stateFile)));
     }
     try { detachSession(); } catch (err: any) {
       console.warn('[browse] Failed to detach CDP session:', err.message);

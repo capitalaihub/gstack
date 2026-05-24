@@ -16,6 +16,7 @@ import { writeSecureFile, mkdirSecure } from './file-permissions';
 import { resolveConfig, ensureStateDir, readVersionHash } from './config';
 import { parseProxyConfig, computeConfigHash, ProxyConfigError } from './proxy-config';
 import { redactProxyUrl } from './proxy-redact';
+import { readAgentRecord, killAgentByRecord, clearAgentRecord } from './terminal-agent-control';
 
 const config = resolveConfig();
 const IS_WINDOWS = process.platform === 'win32';
@@ -1040,13 +1041,19 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
       }
       try {
         if (fs.existsSync(termAgentScript)) {
-          // Kill old terminal-agents so a stale port file can't trick the
-          // server into routing /pty-session at a dead listener.
-          try {
-            const { spawnSync } = require('child_process');
-            spawnSync('pkill', ['-f', 'terminal-agent\\.ts'], { stdio: 'ignore', timeout: 3000 });
-          } catch (err: any) {
-            if (err?.code !== 'ENOENT') throw err;
+          // Kill any stale terminal-agent from a prior run so its port file
+          // can't trick the server into routing /pty-session at a dead
+          // listener. Identity-based (v1.44+) — only kills the PID recorded
+          // in `<stateDir>/terminal-agent-pid`. Pre-v1.44 used
+          // `pkill -f terminal-agent\.ts` which matched sibling gstack
+          // sessions; see terminal-agent-control.ts header for rationale.
+          {
+            const stateDir = path.dirname(config.stateFile);
+            const prior = readAgentRecord(stateDir);
+            if (prior) {
+              killAgentByRecord(prior, 'SIGTERM');
+              clearAgentRecord(stateDir);
+            }
           }
           const termProc = Bun.spawn(['bun', 'run', termAgentScript], {
             cwd: config.projectDir,

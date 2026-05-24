@@ -25,12 +25,21 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { writeSecureFile, mkdirSecure } from './file-permissions';
 import { safeUnlink } from './error-handling';
+import { writeAgentRecord, clearAgentRecord } from './terminal-agent-control';
 
 const STATE_FILE = process.env.BROWSE_STATE_FILE || path.join(process.env.HOME || '/tmp', '.gstack', 'browse.json');
 const PORT_FILE = path.join(path.dirname(STATE_FILE), 'terminal-port');
 const BROWSE_SERVER_PORT = parseInt(process.env.BROWSE_SERVER_PORT || '0', 10);
 const EXTENSION_ID = process.env.BROWSE_EXTENSION_ID || ''; // optional: tighten Origin check
 const INTERNAL_TOKEN = crypto.randomBytes(32).toString('base64url'); // shared with parent server via env at spawn
+/**
+ * Per-boot generation identifier. Loopback /internal/* callers include
+ * `X-Browse-Gen: <CURRENT_GEN>` so a slow agent the watchdog respawned
+ * around can't service a stale grant from the prior generation. Absent
+ * header means "legacy caller" and is accepted (backward compat); a
+ * present-but-mismatched header returns 409 stale generation.
+ */
+const CURRENT_GEN = crypto.randomBytes(16).toString('base64url');
 
 // In-memory cookie token registry. Parent posts /internal/grant after
 // /pty-session; we validate WS cookies against this set.
@@ -201,6 +210,27 @@ function disposeSession(session: PtySession): void {
  *
  * Everything else returns 404. The listener binds 127.0.0.1 only.
  */
+/**
+ * Validate a loopback /internal/* request. Returns null when the request
+ * is allowed; otherwise returns the Response to send back. Centralizes
+ * bearer auth + the v1.44 X-Browse-Gen generation check so adding a new
+ * /internal/* route is a one-liner. The full internalHandler<T> wrapper
+ * arrives in Commit 1 alongside the new routes; this is the minimal
+ * shape needed to gate the existing /internal/grant + /internal/revoke
+ * without copy-pasting the gen check.
+ */
+function checkInternalAuth(req: Request): Response | null {
+  const auth = req.headers.get('authorization');
+  if (auth !== `Bearer ${INTERNAL_TOKEN}`) {
+    return new Response('forbidden', { status: 403 });
+  }
+  const headerGen = req.headers.get('x-browse-gen');
+  if (headerGen && headerGen !== CURRENT_GEN) {
+    return new Response('stale generation', { status: 409 });
+  }
+  return null;
+}
+
 function buildServer() {
   return Bun.serve({
     hostname: '127.0.0.1',
@@ -212,10 +242,8 @@ function buildServer() {
 
       // /internal/grant — loopback-only handshake from parent server.
       if (url.pathname === '/internal/grant' && req.method === 'POST') {
-        const auth = req.headers.get('authorization');
-        if (auth !== `Bearer ${INTERNAL_TOKEN}`) {
-          return new Response('forbidden', { status: 403 });
-        }
+        const denied = checkInternalAuth(req);
+        if (denied) return denied;
         return req.json().then((body: any) => {
           if (typeof body?.token === 'string' && body.token.length > 16) {
             validTokens.add(body.token);
@@ -226,14 +254,26 @@ function buildServer() {
 
       // /internal/revoke — drop a token (called on WS close or bootstrap reload)
       if (url.pathname === '/internal/revoke' && req.method === 'POST') {
-        const auth = req.headers.get('authorization');
-        if (auth !== `Bearer ${INTERNAL_TOKEN}`) {
-          return new Response('forbidden', { status: 403 });
-        }
+        const denied = checkInternalAuth(req);
+        if (denied) return denied;
         return req.json().then((body: any) => {
           if (typeof body?.token === 'string') validTokens.delete(body.token);
           return new Response('ok');
         }).catch(() => new Response('bad', { status: 400 }));
+      }
+
+      // /internal/healthz — liveness probe used by the v1.44 watchdog.
+      // Returns this agent's pid + gen + active session count without
+      // touching claude binary lookup (which can fail for non-process
+      // reasons and isn't a useful liveness signal).
+      if (url.pathname === '/internal/healthz' && req.method === 'GET') {
+        const denied = checkInternalAuth(req);
+        if (denied) return denied;
+        return new Response(JSON.stringify({
+          pid: process.pid,
+          gen: CURRENT_GEN,
+          sessions: validTokens.size,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
       // /claude-available — bootstrap card hits this when user clicks "I installed it".
@@ -548,14 +588,25 @@ function main() {
   writeSecureFile(tmp, String(port));
   fs.renameSync(tmp, PORT_FILE);
 
+  // Write identity-based agent record (pid + per-boot gen). Replaces the
+  // v1.43- `pkill -f terminal-agent\.ts` regex teardown that could kill
+  // sibling gstack sessions. Callers (cli.ts spawn site, server.ts
+  // shutdown, the v1.44 watchdog) now route through killAgentByRecord in
+  // terminal-agent-control.ts.
+  writeAgentRecord(dir, { pid: process.pid, gen: CURRENT_GEN, startedAt: Date.now() });
+
   // Hand the parent the internal token so it can call /internal/grant.
   // Parent learns INTERNAL_TOKEN via env (TERMINAL_AGENT_INTERNAL_TOKEN below).
   // We just print it on stdout for the supervising process to pick up if it's
   // not already in env. Defense against env races at spawn time.
-  console.log(`[terminal-agent] listening on 127.0.0.1:${port} pid=${process.pid}`);
+  console.log(`[terminal-agent] listening on 127.0.0.1:${port} pid=${process.pid} gen=${CURRENT_GEN}`);
 
-  // Cleanup port file on exit.
-  const cleanup = () => { safeUnlink(PORT_FILE); process.exit(0); };
+  // Cleanup port file + agent record on exit.
+  const cleanup = () => {
+    safeUnlink(PORT_FILE);
+    clearAgentRecord(dir);
+    process.exit(0);
+  };
   process.on('SIGTERM', cleanup);
   process.on('SIGINT', cleanup);
 }
