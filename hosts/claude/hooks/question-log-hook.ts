@@ -204,7 +204,7 @@ function detectSkill(cwd: string | undefined): string {
   return 'unknown';
 }
 
-function spawnLog(payload: Record<string, unknown>): void {
+function spawnLog(payload: Record<string, unknown>, cwd?: string): void {
   // Locate the bin relative to this script's directory.
   const here = path.dirname(new URL(import.meta.url).pathname);
   // hosts/claude/hooks/ -> ../../../bin/
@@ -214,6 +214,9 @@ function spawnLog(payload: Record<string, unknown>): void {
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 3000,
+    // Run from the originating tool call's cwd so gstack-slug resolves to
+    // the project the user is actually in, not the hook script's location.
+    cwd: cwd && fs.existsSync(cwd) ? cwd : undefined,
   });
   if (res.status !== 0) {
     logHookError(`gstack-question-log exited ${res.status}: ${res.stderr || res.stdout}`);
@@ -274,7 +277,7 @@ async function main(): Promise<void> {
     if (recommended) payload.recommended = recommended.slice(0, 64);
     if (choice.free_text) payload.free_text = String(choice.free_text);
 
-    spawnLog(payload);
+    spawnLog(payload, stdin.cwd);
   }
 
   process.exit(0);
