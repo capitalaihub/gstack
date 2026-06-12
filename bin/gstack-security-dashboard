@@ -41,28 +41,48 @@ if [ -z "$SUPABASE_URL" ] || [ -z "$ANON_KEY" ]; then
   exit 0
 fi
 
-DATA="$(curl -sf --max-time 15 \
+# Fetch with the HTTP status captured (#1947). A backend failure must read
+# as "unknown", never as a healthy "0 attacks" — fake zeros on a security
+# surface are indistinguishable from good news.
+TMPBODY="$(mktemp)"
+trap 'rm -f "$TMPBODY"' EXIT
+HTTP_CODE="$(curl -s --max-time 15 -w '%{http_code}' -o "$TMPBODY" \
   "${SUPABASE_URL}/functions/v1/community-pulse" \
   -H "apikey: ${ANON_KEY}" \
-  2>/dev/null || echo "{}")"
+  2>/dev/null || echo "000")"
+DATA="$(cat "$TMPBODY" 2>/dev/null || echo "")"
 
-# Extract the security section. Prefer jq for brace-balanced parsing of
-# nested arrays/objects (top_attack_domains etc.). Fall back to regex if
-# jq isn't installed — the regex is lossy but the dashboard degrades
-# gracefully to "0 attacks" rather than misreporting numbers.
-if command -v jq >/dev/null 2>&1; then
-  SEC_SECTION="$(echo "$DATA" | jq -rc '.security // empty | "\"security\":\(.)"' 2>/dev/null || echo "")"
-else
-  SEC_SECTION="$(echo "$DATA" | grep -o '"security":{[^}]*}' 2>/dev/null || echo "")"
+# Classify the response:
+#   ok      — 200 from the new backend (carries "status":"ok"); figures authoritative
+#   legacy  — 200 with a security section but no marker (pre-#1947 backend);
+#             figures shown but flagged unverified (old backend masked errors as zeros)
+#   unknown — non-200 / network failure / error body / missing section / no jq
+STATE="ok"
+REASON=""
+if [ "$HTTP_CODE" != "200" ] || [ -z "$DATA" ]; then
+  STATE="unknown"; REASON="backend_error"
+elif ! command -v jq >/dev/null 2>&1; then
+  # No lossy-grep fallback: the old regex broke on nested arrays and
+  # under-reported attacks as zero. Without jq the honest answer is unknown.
+  STATE="unknown"; REASON="jq_missing"
+elif ! echo "$DATA" | jq -e '.security' >/dev/null 2>&1; then
+  STATE="unknown"; REASON="backend_error"
+elif [ "$(echo "$DATA" | jq -r '.status // empty' 2>/dev/null)" != "ok" ]; then
+  STATE="legacy"
 fi
 
 if [ "$JSON_MODE" = "1" ]; then
-  # Machine-readable — echo the whole security section (or empty object)
-  if [ -n "$SEC_SECTION" ]; then
-    echo "{${SEC_SECTION}}"
-  else
-    echo '{"security":{"attacks_last_7_days":0,"top_attack_domains":[],"top_attack_layers":[],"verdict_distribution":[]}}'
-  fi
+  case "$STATE" in
+    unknown)
+      echo "{\"security\":null,\"status\":\"unknown\",\"reason\":\"${REASON}\"}"
+      ;;
+    legacy)
+      echo "$DATA" | jq -c '{security: .security, status: "legacy_unverified"}'
+      ;;
+    ok)
+      echo "$DATA" | jq -c '{security: .security, status: "ok", stale: (.stale // false)}'
+      ;;
+  esac
   exit 0
 fi
 
@@ -71,9 +91,26 @@ echo "gstack security dashboard"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-TOTAL="$(echo "$DATA" | grep -o '"attacks_last_7_days":[0-9]*' | grep -o '[0-9]*' | head -1 || echo "0")"
+if [ "$STATE" = "unknown" ]; then
+  if [ "$REASON" = "jq_missing" ]; then
+    echo "Attacks detected last 7 days: unknown — install jq for exact figures"
+  else
+    echo "Attacks detected last 7 days: unknown — backend error (HTTP ${HTTP_CODE})"
+  fi
+  echo ""
+  echo "Your local log: ~/.gstack/security/attempts.jsonl"
+  echo "Your telemetry mode: $(${GSTACK_DIR}/bin/gstack-config get telemetry 2>/dev/null || echo unknown)"
+  exit 0
+fi
+
+# jq is guaranteed here (jq-missing classified as unknown above). The old
+# grep chain matched the digit 7 inside "attacks_last_7_days" itself and
+# misreported every count as 7.
+TOTAL="$(echo "$DATA" | jq -r '.security.attacks_last_7_days // 0' 2>/dev/null || echo "0")"
 echo "Attacks detected last 7 days: ${TOTAL}"
-if [ "$TOTAL" = "0" ]; then
+if [ "$STATE" = "legacy" ]; then
+  echo "  (unverified — legacy backend response; deploy the latest community-pulse for verified figures)"
+elif [ "$TOTAL" = "0" ]; then
   echo "  (No attack attempts reported by the community yet. Good news.)"
 fi
 echo ""
