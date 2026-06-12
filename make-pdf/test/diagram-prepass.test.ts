@@ -306,6 +306,35 @@ describe("inlineLocalImages", () => {
     expect(out).toContain('data-gstack-px-height="44"');
   });
 
+  test("out-of-tree image reads warn (never silent) and still inline", () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "prepass-outside-"));
+    fs.writeFileSync(path.join(outside, "ext.png"), tinyPng(10, 10));
+    try {
+      const warnings: string[] = [];
+      const out = inlineLocalImages(`<img src="${path.join(outside, "ext.png")}">`, {
+        ...base, warn: (m) => warnings.push(m),
+      });
+      expect(out).toContain("data:image/png;base64,");
+      expect(warnings.some((w) => w.includes("OUTSIDE the input directory"))).toBe(true);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test("out-of-tree image + --strict → StrictModeError", () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "prepass-outside-"));
+    fs.writeFileSync(path.join(outside, "ext.png"), tinyPng(10, 10));
+    try {
+      expect(() =>
+        inlineLocalImages(`<img src="${path.join(outside, "ext.png")}">`, {
+          ...base, strict: true, warn: () => {},
+        }),
+      ).toThrow(StrictModeError);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("Windows drive-letter src is treated as a local path, not a URL scheme", () => {
     // C:/x.png matches the single-letter-scheme regex — it must reach the
     // local-path branch (and the missing-file placeholder), never silently
@@ -313,7 +342,8 @@ describe("inlineLocalImages", () => {
     const warnings: string[] = [];
     const out = inlineLocalImages(`<img src="C:/missing/x.png">`, { ...base, warn: (m) => warnings.push(m) });
     expect(out).toContain("image-missing");
-    expect(warnings.length).toBe(1);
+    // Two warnings: it's out-of-tree (resolved outside inputDir) AND missing.
+    expect(warnings.some((w) => w.includes("image not found"))).toBe(true);
   });
 
   test("indented fences inside lists replay byte-for-byte (no list splitting)", () => {

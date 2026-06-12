@@ -619,6 +619,16 @@ export function inlineLocalImages(html: string, opts: PrepassImageOptions): stri
     const cached = memo.get(filePath);
     if (cached !== undefined) return rewriteImgTag(tag, cached);
 
+    // Out-of-tree reads are legal (local CLI semantics — like pandoc) but
+    // never silent: an agent PDF-ing untrusted markdown should not quietly
+    // embed ~/.ssh/config into a shareable document. --strict makes it fatal.
+    const inputRoot = path.resolve(opts.inputDir) + path.sep;
+    if (!filePath.startsWith(inputRoot)) {
+      const msg = `image resolves OUTSIDE the input directory: ${src} → ${filePath}`;
+      if (opts.strict) throw new StrictModeError(msg + " — move it under the markdown's directory or drop --strict");
+      opts.warn(msg);
+    }
+
     if (!fs.existsSync(filePath)) {
       const msg = `image not found: ${src} (resolved to ${filePath})`;
       if (opts.strict) throw new StrictModeError(msg);
