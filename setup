@@ -1487,3 +1487,15 @@ fi
 if [ "$NO_TEAM_MODE" -eq 1 ] && [ -x "$SETTINGS_HOOK" ]; then
   "$SETTINGS_HOOK" remove-source --source plan-tune-cathedral 2>/dev/null || true
 fi
+
+# ─── Redact pre-push guard hint (#1946) ──────────────────────────────────────
+# The credential pre-push hook is per-REPO state — setup runs in the gstack
+# checkout, the wrong repo to install it into. /ship offers the install once
+# at the moment of relevance (first push) and silently installs in any repo
+# where redact_prepush_hook=true. This hint is setup's whole involvement.
+if [ "$("$GSTACK_CONFIG" get redact_prepush_hook 2>/dev/null || echo false)" != "true" ]; then
+  log ""
+  log "Tip: gstack can block pushes containing credentials (per-repo git hook)."
+  log "     Enable once: gstack-config set redact_prepush_hook true — /ship"
+  log "     installs the hook automatically in every repo you ship from."
+fi
