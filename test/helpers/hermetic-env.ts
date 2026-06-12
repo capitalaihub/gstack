@@ -131,14 +131,18 @@ export interface SeedConfigOpts {
 }
 
 /**
- * Minimal $CLAUDE_CONFIG_DIR/.claude.json that gets a fresh-config child past
- * first-run prompts non-interactively. Every key here was empirically
- * verified against a real ~/.claude.json (2026-06-12, claude 2.1.175):
+ * Minimal $CLAUDE_CONFIG_DIR/.claude.json for fresh-config children.
+ *
+ * Empirically verified 2026-06-12 on claude 2.1.175: PRINT MODE (`claude -p`)
+ * with ANTHROPIC_API_KEY needs NO seed at all — a fresh empty config dir ran
+ * non-interactively (exit 0, real cost billed to the key). The seed exists
+ * for the PTY path, where first-run TUI prompts DO appear:
  * - hasCompletedOnboarding: suppresses the onboarding flow
  * - customApiKeyResponses.approved: suppresses the "use this API key?"
- *   prompt; entries are the key's LAST 20 CHARS
+ *   prompt; entries are the key's LAST 20 CHARS (shape verified against a
+ *   real ~/.claude.json)
  * - projects[dir].hasTrustDialogAccepted: pre-trusts repo-cwd PTY sessions
- *   (print mode skips the dialog; PTY plan-mode tests don't)
+ *   (the pty-runner's 15s trust-watcher remains as fallback for temp cwds)
  * bypassPermissionsModeAccepted was considered and dropped: absent from a
  * real config even though --dangerously-skip-permissions is in daily use.
  */
