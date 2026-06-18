@@ -592,48 +592,16 @@ export class BrowserManager {
     this.intentionalDisconnect = false;
 
     // ─── Anti-bot-detection patches ───────────────────────────────
-    // D7 (codex correction): mask navigator.webdriver only. We do NOT fake
-    // plugins/languages — modern fingerprinters check consistency between
-    // those and userAgent/platform, and synthesizing fixed values can flag
-    // MORE bot-like, not less. Let Chromium's natural plugins and languages
-    // surface unmodified.
-    //
-    // What we DO clean up are automation-specific runtime artifacts that
-    // shouldn't exist in a real browser at all (Permissions API quirks,
-    // ChromeDriver-injected window globals). Those aren't fingerprint
-    // synthesis — they're removing leaked automation tells.
+    // Apply Layer C stealth (applyStealth): masks navigator.webdriver,
+    // restores window.chrome.* shape, aligns Notification.permission, sets
+    // per-install hardware, and strips automation runtime artifacts (cdc_/
+    // __webdriver globals + the Permissions notifications 'denied' tell).
+    // We still do NOT fake navigator.plugins/languages — faking those flags
+    // more bot-like, not less (D7). The cdc/Permissions cleanup moved into
+    // applyStealth so headless launch() and handoff() get it too, not just
+    // this headed path.
     const { applyStealth } = await import('./stealth');
     await applyStealth(this.context);
-    await this.context.addInitScript(() => {
-      // Remove CDP runtime artifacts that automation detectors look for
-      // cdc_ prefixed vars are injected by ChromeDriver/CDP
-      const cleanup = () => {
-        for (const key of Object.keys(window)) {
-          if (key.startsWith('cdc_') || key.startsWith('__webdriver')) {
-            try {
-              delete (window as any)[key];
-            } catch (e: any) {
-              if (!(e instanceof TypeError)) throw e;
-            }
-          }
-        }
-      };
-      cleanup();
-      // Re-clean after a tick in case they're injected late
-      setTimeout(cleanup, 0);
-
-      // Override Permissions API to return 'prompt' for notifications
-      // (automation browsers return 'denied' which is a fingerprint)
-      const originalQuery = window.navigator.permissions?.query;
-      if (originalQuery) {
-        (window.navigator.permissions as any).query = (params: any) => {
-          if (params.name === 'notifications') {
-            return Promise.resolve({ state: 'prompt', onchange: null } as PermissionStatus);
-          }
-          return originalQuery.call(window.navigator.permissions, params);
-        };
-      }
-    });
 
     // Inject visual indicator — subtle top-edge amber gradient
     // Extension's content script handles the floating pill
@@ -1618,6 +1586,13 @@ export class BrowserManager {
       this.pages.clear();
       this.tabSessions.clear();
       this.connectionMode = 'headed';
+
+      // Same Layer C stealth as launch()/launchHeaded(). Must run BEFORE
+      // restoreState() navigates so the init scripts apply to the restored
+      // pages — without this the handed-off browser had cmdline args but no
+      // JS stealth (no webdriver mask, no chrome.* shape, no toString proxy).
+      const { applyStealth } = await import('./stealth');
+      await applyStealth(newContext);
 
       if (Object.keys(this.extraHeaders).length > 0) {
         await newContext.setExtraHTTPHeaders(this.extraHeaders);

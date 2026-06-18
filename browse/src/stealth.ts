@@ -367,17 +367,69 @@ function extendedModeEnabled(): boolean {
 }
 
 /**
- * Apply stealth patches to a fresh BrowserContext (or persistent context).
- * Called by browser-manager.launch() and launchHeaded().
+ * Strip automation runtime artifacts that don't belong in a real browser
+ * and that no fingerprint-synthesis layer can mask: ChromeDriver/CDP window
+ * globals (cdc_*, __webdriver*) and the Permissions API quirk where an
+ * automated Chromium reports notifications as 'denied' instead of real
+ * Chrome's 'prompt'. The 'prompt' answer is aligned with Layer C's
+ * Notification.permission = 'default' so the two surfaces stay consistent.
  *
- * Always applies the always-on Layer C stealth script (built from the
- * per-install host profile) — the consistency-first default. When
- * GSTACK_STEALTH=extended is set, layers the opt-in EXTENDED_STEALTH_SCRIPT
- * on top: its window.chrome.* patches are `if (!...)`-guarded, so Layer C's
- * richer shapes win, while the extended-only additions (WebGL spoof, faked
- * navigator.plugins, mediaDevices, cdc_* cleanup) apply on top. Extended
- * mode actively LIES about the browser and can break sites that reflect on
- * these properties, so it stays off by default.
+ * Runs on EVERY launch path via applyStealth (headless launch(),
+ * launchHeaded(), handoff()) so the Notification/Permissions pairing never
+ * diverges by mode. Previously this lived inline in launchHeaded() only,
+ * which left headless and handoff with the Notification value but not the
+ * matching Permissions answer.
+ */
+const AUTOMATION_ARTIFACT_CLEANUP_SCRIPT = `(() => {
+  // cdc_/__webdriver globals are injected by ChromeDriver/CDP. A detector
+  // finds them by iterating window keys. Strip immediately and again after a
+  // tick in case they are injected late.
+  const cleanup = () => {
+    for (const key of Object.keys(window)) {
+      if (key.startsWith('cdc_') || key.startsWith('__webdriver')) {
+        try { delete window[key]; } catch (e) { if (!(e instanceof TypeError)) throw e; }
+      }
+    }
+  };
+  cleanup();
+  setTimeout(cleanup, 0);
+
+  // Permissions API: automated Chromium returns 'denied' for notifications,
+  // a known tell. Return 'prompt' to match real Chrome (and Layer C's
+  // Notification.permission = 'default').
+  const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+  if (originalQuery) {
+    window.navigator.permissions.query = (params) => {
+      if (params && params.name === 'notifications') {
+        return Promise.resolve({ state: 'prompt', onchange: null });
+      }
+      return originalQuery.call(window.navigator.permissions, params);
+    };
+  }
+})();`;
+
+/**
+ * Apply stealth patches to a fresh BrowserContext (or persistent context).
+ * Called by browser-manager.launch(), launchHeaded(), AND handoff() so all
+ * three launch paths get identical stealth.
+ *
+ * Injection order (Playwright evaluates init scripts in registration order):
+ *   1. Layer C (buildStealthScript) — the always-on consistency-first default.
+ *   2. Automation-artifact cleanup (cdc_/__webdriver + Permissions shim),
+ *      kept consistent with Layer C's Notification.permission alignment.
+ *   3. EXTENDED_STEALTH_SCRIPT — only when GSTACK_STEALTH=extended (off by
+ *      default). Its window.chrome.* patches are `if (!...)`-guarded, so
+ *      Layer C's richer shapes win; the extended-only additions (WebGL spoof,
+ *      faked navigator.plugins, mediaDevices) apply on top.
+ *
+ * KNOWN LIMITATION (extended mode only, opt-in): extended's functions are NOT
+ * wrapped by Layer C's Function.prototype.toString proxy, so they stringify
+ * as injected code; its prototype-level navigator.webdriver delete is shadowed
+ * by Layer C's own-property getter (net behavior still matches real Chrome:
+ * webdriver present and false); and its hardcoded Apple-M1 WebGL string can
+ * disagree with the env-driven GPU spoof in buildGStackLaunchArgs on non-Apple
+ * hosts. This is acceptable for the documented "actively lies, may break sites"
+ * escape hatch; the consistency-first default (Layer C alone) has none of these.
  *
  * Host profile is resolved from process.env at call time so per-install
  * values bake into the script before Playwright sends it to Chromium via
@@ -386,6 +438,7 @@ function extendedModeEnabled(): boolean {
 export async function applyStealth(context: BrowserContext): Promise<void> {
   const hw = readHostProfile();
   await context.addInitScript({ content: buildStealthScript(hw) });
+  await context.addInitScript({ content: AUTOMATION_ARTIFACT_CLEANUP_SCRIPT });
   if (extendedModeEnabled()) {
     await context.addInitScript({ content: EXTENDED_STEALTH_SCRIPT });
   }

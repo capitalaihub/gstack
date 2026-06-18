@@ -227,3 +227,30 @@ describe('BrowserManager.onDisconnect exit-code propagation', () => {
     expect(shutdownCalls).toEqual([0, 2, 2]);
   });
 });
+
+// ─── Stealth injected on EVERY launch path (regression tripwire) ───
+//
+// applyStealth must run on launch() (headless), launchHeaded(), AND
+// handoff(). The blend of Layer C with extended mode left handoff() building
+// cmdline args but never calling applyStealth, so a handed-off browser had
+// no JS stealth (no webdriver mask, no chrome.* shape, no toString proxy).
+// This static check fails CI if any launch path drops the call again.
+describe('stealth injected on every launch path', () => {
+  it('handoff() calls applyStealth and there are >= 3 call sites', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'browser-manager.ts'), 'utf-8');
+
+    // >= 3 total applyStealth call sites (launch, launchHeaded, handoff).
+    const callSites = src.match(/applyStealth\(/g) || [];
+    expect(callSites.length).toBeGreaterThanOrEqual(3);
+
+    // The handoff() method body specifically must call applyStealth, before
+    // the resume() JSDoc that follows it.
+    const handoffStart = src.indexOf('async handoff(');
+    expect(handoffStart).toBeGreaterThan(0);
+    const resumeAnchor = src.indexOf('Resume AI control after user handoff', handoffStart);
+    const handoffBody = src.slice(handoffStart, resumeAnchor > 0 ? resumeAnchor : handoffStart + 4000);
+    expect(handoffBody).toContain('applyStealth(');
+  });
+});

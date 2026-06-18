@@ -89,7 +89,7 @@ describe('EXTENDED_STEALTH_SCRIPT — six detection-vector patches', () => {
 });
 
 describe('applyStealth — script wiring', () => {
-  test('default mode applies ONLY the Layer C script (not extended)', async () => {
+  test('default mode applies Layer C + cleanup, not extended', async () => {
     delete process.env.GSTACK_STEALTH;
     const calls: string[] = [];
     const fakeCtx = {
@@ -98,14 +98,19 @@ describe('applyStealth — script wiring', () => {
       },
     } as unknown as Parameters<typeof applyStealth>[0];
     await applyStealth(fakeCtx);
-    expect(calls).toHaveLength(1);
-    // Layer C signatures: toString-proxy native-code lie + webdriver mask.
+    expect(calls).toHaveLength(2);
+    // [0] = Layer C (toString-proxy native-code lie + webdriver mask).
     expect(calls[0]).toContain('[native code]');
     expect(calls[0]).toContain('webdriver');
-    expect(calls[0]).not.toBe(EXTENDED_STEALTH_SCRIPT);
+    // [1] = automation-artifact cleanup (cdc_ scan + Permissions shim) —
+    //       now applied on EVERY launch path, not just the headed one.
+    expect(calls[1]).toContain('cdc_');
+    expect(calls[1]).toContain('setTimeout(cleanup');
+    // Extended script must NOT be applied by default.
+    expect(calls).not.toContain(EXTENDED_STEALTH_SCRIPT);
   });
 
-  test('extended mode applies BOTH scripts in order (Layer C first, extended second)', async () => {
+  test('extended mode applies Layer C, cleanup, then extended (in order)', async () => {
     process.env.GSTACK_STEALTH = 'extended';
     const calls: string[] = [];
     const fakeCtx = {
@@ -114,9 +119,9 @@ describe('applyStealth — script wiring', () => {
       },
     } as unknown as Parameters<typeof applyStealth>[0];
     await applyStealth(fakeCtx);
-    expect(calls).toHaveLength(2);
-    // Layer C first (its native-code lie), extended second.
-    expect(calls[0]).toContain('[native code]');
-    expect(calls[1]).toBe(EXTENDED_STEALTH_SCRIPT);
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toContain('[native code]');     // Layer C first
+    expect(calls[1]).toContain('cdc_');              // cleanup second
+    expect(calls[2]).toBe(EXTENDED_STEALTH_SCRIPT);  // extended last
   });
 });
