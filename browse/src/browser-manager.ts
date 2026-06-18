@@ -1423,6 +1423,14 @@ export class BrowserManager {
       }
       this.context = await this.browser.newContext(contextOptions);
 
+      // Re-apply stealth: newContext() is a fresh context with no init scripts,
+      // so a useragent / viewport --scale rebuild would otherwise drop the
+      // webdriver mask, window.chrome.* shape, hardware spoof, and cdc/
+      // Permissions cleanup on every restored page. Must run before
+      // restoreState() navigates the restored tabs.
+      const { applyStealth } = await import('./stealth');
+      await applyStealth(this.context);
+
       if (Object.keys(this.extraHeaders).length > 0) {
         await this.context.setExtraHTTPHeaders(this.extraHeaders);
       }
@@ -1446,6 +1454,9 @@ export class BrowserManager {
           contextOptions.userAgent = this.customUserAgent;
         }
         this.context = await this.browser!.newContext(contextOptions);
+        // Stealth applies to the fallback blank context too.
+        const { applyStealth } = await import('./stealth');
+        await applyStealth(this.context);
         await this.newTab();
         this.clearRefs();
       } catch {

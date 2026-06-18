@@ -408,7 +408,11 @@ export const AUTOMATION_ARTIFACT_CLEANUP_SCRIPT = `(() => {
 
   // Permissions API: automated Chromium returns 'denied' for notifications,
   // a known tell. Return 'prompt' to match real Chrome (and Layer C's
-  // Notification.permission = 'default').
+  // Notification.permission = 'default'). Tradeoff: this pins the
+  // notifications state to fresh-Chrome values for the whole session, so a
+  // site that actually grants/denies notifications would see a stale value.
+  // Acceptable for the automation/anti-detection use case (which does not
+  // drive real notification grants); only notifications is overridden.
   const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
   if (originalQuery) {
     window.navigator.permissions.query = (params) => {
@@ -422,8 +426,9 @@ export const AUTOMATION_ARTIFACT_CLEANUP_SCRIPT = `(() => {
 
 /**
  * Apply stealth patches to a fresh BrowserContext (or persistent context).
- * Called by browser-manager.launch(), launchHeaded(), AND handoff() so all
- * three launch paths get identical stealth.
+ * Called by EVERY context-creation path in browser-manager — launch(),
+ * launchHeaded(), handoff(), AND recreateContext() (the useragent /
+ * viewport --scale rebuild) — so a context can never reach a page un-stealthed.
  *
  * Injection order (Playwright evaluates init scripts in registration order):
  *   1. Layer C (buildStealthScript) — the always-on consistency-first default.
@@ -485,6 +490,14 @@ export const STEALTH_LAUNCH_ARGS = [
  * on builds that DO NOT have the C++ patches applied (gbrowser
  * pre-Pack-1) and on hosts where gbd hasn't yet populated some
  * fields (legacy installs).
+ *
+ * TRUSTED-SOURCE ONLY. These GSTACK_* values are populated by gbd from
+ * host_profile.go (system_profiler / sysctl) and become page-visible WebGL /
+ * UA-CH surface data. They are NOT sanitized here (passed verbatim into the
+ * argv array, which is injection-safe because Playwright spawns Chromium with
+ * an argv array, not a shell). NEVER route page content, HTTP headers, or any
+ * remote/untrusted input into these env vars — that would turn this into an
+ * argv-injection sink. readHostProfile() applies the same trust assumption.
  *
  * Mapping (gbd env → Chromium cmdline switch → C++ patch consumer):
  *   GSTACK_GPU_VENDOR        → --gstack-gpu-vendor        → webgl-vendor-spoof.patch

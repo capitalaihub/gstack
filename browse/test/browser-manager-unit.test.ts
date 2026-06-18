@@ -235,23 +235,36 @@ describe('BrowserManager.onDisconnect exit-code propagation', () => {
 // cmdline args but never calling applyStealth, so a handed-off browser had
 // no JS stealth (no webdriver mask, no chrome.* shape, no toString proxy).
 // This static check fails CI if any launch path drops the call again.
-describe('stealth injected on every launch path', () => {
-  it('handoff() calls applyStealth and there are >= 3 call sites', async () => {
+describe('stealth injected on every context-creation path', () => {
+  it('every context-creation path calls applyStealth (>= 4 call sites)', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const src = readFileSync(join(import.meta.dir, '..', 'src', 'browser-manager.ts'), 'utf-8');
 
-    // >= 3 total applyStealth call sites (launch, launchHeaded, handoff).
+    // Every path that builds a BrowserContext must apply stealth: launch()
+    // (headless), launchHeaded(), handoff(), and recreateContext() (the
+    // useragent / viewport --scale rebuild, main + fallback). A path that
+    // creates a context without applyStealth silently un-stealths its pages.
     const callSites = src.match(/applyStealth\(/g) || [];
-    expect(callSites.length).toBeGreaterThanOrEqual(3);
+    expect(callSites.length).toBeGreaterThanOrEqual(4);
 
-    // The handoff() method body specifically must call applyStealth, before
-    // the resume() JSDoc that follows it.
+    // handoff() body specifically must call applyStealth, before the resume() JSDoc.
     const handoffStart = src.indexOf('async handoff(');
     expect(handoffStart).toBeGreaterThan(0);
     const resumeAnchor = src.indexOf('Resume AI control after user handoff', handoffStart);
     const handoffBody = src.slice(handoffStart, resumeAnchor > 0 ? resumeAnchor : handoffStart + 4000);
     expect(handoffBody).toContain('applyStealth(');
+
+    // recreateContext() body must call applyStealth too — useragent and
+    // viewport --scale route through it and would otherwise drop all stealth.
+    const recreateStart = src.indexOf('recreateContext');
+    expect(recreateStart).toBeGreaterThan(0);
+    // Find the method definition (not just the JSDoc/caller references).
+    const recreateDef = src.indexOf('async recreateContext(');
+    expect(recreateDef).toBeGreaterThan(0);
+    const setUaAnchor = src.indexOf('async setDeviceScaleFactor(', recreateDef);
+    const recreateBody = src.slice(recreateDef, setUaAnchor > 0 ? setUaAnchor : recreateDef + 6000);
+    expect(recreateBody).toContain('applyStealth(');
   });
 
   it('buildGStackLaunchArgs() is spread into all 3 launch sites', async () => {
