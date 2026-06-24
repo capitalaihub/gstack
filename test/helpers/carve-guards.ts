@@ -128,6 +128,8 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     maxSkeletonBytes: 90_000,
     minUnionBytes: 120_000,
     mustContain: ['VERSION', 'CHANGELOG', 'review', 'merge', 'PR'],
+    // v1.58.5.0: pre-push-guard install (#2077) stacks on the shared first-run-guidance preamble.
+    maxSizeRatio: 1.08,
   },
   'plan-ceo-review': {
     skill: 'plan-ceo-review',
@@ -161,8 +163,8 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
       gateAfterStop: 'EXIT PLAN MODE GATE',
     },
     behavioral: 'plan',
-    // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 65_000,
+    // v1.2.0 activation lift (shared first-run-guidance preamble) + #2077 ask-first scope gate.
+    maxSkeletonBytes: 67_000,
     minUnionBytes: 70_000,
     mustContain: ['Architecture', 'Code Quality', 'Test', 'Performance'],
     // Cross-cutting preamble growth (v1.57.2.0 AUQ-failure prose fallback + the
@@ -186,10 +188,11 @@ export const CARVE_GUARDS: Record<string, CarveGuard> = {
     behavioral: 'plan',
     // +Conductor AUQ-default-prose rule + one-way/continuation safety in the
     // always-loaded AskUserQuestion Format section.
-    // v1.2.0 activation lift: first-run-guidance section in the shared preamble.
-    maxSkeletonBytes: 86_000,
+    // v1.2.0 activation lift (shared first-run-guidance preamble) + #2077 ask-first scope gate.
+    maxSkeletonBytes: 88_000,
     minUnionBytes: 70_000,
     mustContain: ['design', 'visual'],
+    maxSizeRatio: 1.07,
   },
   'plan-devex-review': {
     skill: 'plan-devex-review',
