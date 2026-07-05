@@ -22,11 +22,78 @@ _UNCONFIRMED_FILES="${_UNCONFIRMED_FILES% }"
 [ -n "$_UNCONFIRMED_FILES" ] && echo "ADV_UNCONFIRMED: yes" || echo "ADV_UNCONFIRMED: no"
 [ -f "$_ADV_FILE" ] && echo "ADV_PRIOR_HEAD: yes" || echo "ADV_PRIOR_HEAD: no"
 echo "ADV_UNCONFIRMED_FILES: $_UNCONFIRMED_FILES"
+
+# T-ADV-SIDECAR-ENFORCEMENT: track how many /ship invocations have now surfaced
+# each unconfirmed file. A file with no .confirmed sidecar is by construction
+# still in _UNCONFIRMED_FILES above (deferred/fixed/dismissed sidecars already
+# removed it from that list at the `[ ! -f "${_f}.confirmed" ]` check) — so this
+# loop only ever counts genuinely unconfirmed files, never deferred ones.
+_BLOCK_FILES=""
+for _f in $_UNCONFIRMED_FILES; do
+  _SEEN_FILE="${_f}.seen_count"
+  _PRIOR_COUNT=$(cat "$_SEEN_FILE" 2>/dev/null || echo 0)
+  _NEW_COUNT=$((_PRIOR_COUNT + 1))
+  echo "$_NEW_COUNT" > "$_SEEN_FILE"
+  echo "ADV_SEEN_COUNT[$_f]: $_NEW_COUNT"
+  if [ "$_NEW_COUNT" -ge 2 ]; then
+    _BLOCK_FILES="$_BLOCK_FILES $_f"
+  fi
+done
+_BLOCK_FILES="${_BLOCK_FILES# }"
+[ -n "$_BLOCK_FILES" ] && echo "ADV_BLOCK: yes" || echo "ADV_BLOCK: no"
+echo "ADV_BLOCK_FILES: $_BLOCK_FILES"
 ```
 
-**Branch on output:**
+**Branch on output (check `ADV_BLOCK` first — it overrides the `ADV_UNCONFIRMED` branch below):**
 
-**`ADV_UNCONFIRMED: yes`:** Read each file listed in `ADV_UNCONFIRMED_FILES` and
+**`ADV_BLOCK: yes`:** **Hard block — `/ship` halts entirely. This is not the
+STOP-and-re-present loop below; no fresh adversarial pass, no continuation to
+any later `/ship` step, regardless of diff size or Codex availability. Same
+severity as any other Step 2 checklist hard-stop — not a warning that gets
+logged and passed through.**
+
+Exemption: a file whose `.confirmed` sidecar already records a
+`deferred:<target sprint>` disposition never reaches this counter — sidecar
+presence excludes it from `_UNCONFIRMED_FILES` before the counting loop runs,
+so it can never accumulate a seen-count. No separate carve-out logic is
+needed; this is stated explicitly so the interaction isn't left implicit.
+
+Before printing the block message, show literal evidence, not a self-report:
+
+1. The invocation count for each blocking file — echo the `ADV_SEEN_COUNT[<file>]`
+   value already printed above for every entry in `ADV_BLOCK_FILES`.
+2. The full disposition list currently on disk for this project — run and paste
+   verbatim:
+   ```bash
+   for _sc in "$_PROJ"/adversarial-*.md.confirmed; do
+     [ -f "$_sc" ] && echo "$(basename "$_sc"): $(cat "$_sc")"
+   done
+   ```
+   so the user sees the confirmed/deferred/dismissed state of every other file
+   next to the blocking one(s), not just the blocking file in isolation.
+
+Then print:
+
+```
+ADVERSARIAL REVIEW: BLOCKED
+<N> unconfirmed finding set(s) have now surfaced across 2+ /ship invocations
+without a .confirmed sidecar:
+  <file> — seen <count>x, no .confirmed sidecar
+  ...
+/ship cannot proceed until a .confirmed sidecar exists for each file listed above.
+Respond to the findings above, or explicitly defer/dismiss with a reason.
+```
+
+**STOP.**
+
+**Clearing the block:** once the user responds and a `.confirmed` sidecar is
+written for every file in `ADV_BLOCK_FILES`, run
+`rm -f "${_f}.seen_count"` for each cleared file so its counter resets, then
+re-run the resume-case check from the top. Report the fresh `ADV_BLOCK` /
+`ADV_UNCONFIRMED` output verbatim as evidence the block actually cleared —
+do not state "block cleared" without showing that output.
+
+**`ADV_UNCONFIRMED: yes`** (and `ADV_BLOCK: no`)**:** Read each file listed in `ADV_UNCONFIRMED_FILES` and
 re-present its full contents verbatim under:
 `ADVERSARIAL REVIEW (resumed — N unconfirmed finding set(s)):`, with each set
 labelled by filename (e.g. `### From adversarial-abc1234.md`). Do NOT run a
