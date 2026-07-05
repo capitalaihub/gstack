@@ -2,6 +2,47 @@
 <!-- Regenerate: bun run gen:skill-docs -->
 ## Step 11: Adversarial review (always-on)
 
+**Resume-case check (run first, before any sub-step below):**
+
+Before launching the adversarial subagent, scan for ALL unconfirmed prior adversarial
+finding files across every commit for this project — not just the current HEAD. A file
+is considered confirmed only when a `.confirmed` sidecar exists alongside it. Sidecar
+presence alone is sufficient to exclude a file; the disposition recorded inside is not
+re-evaluated here (fixed / deferred / dismissed are all treated as resolved).
+
+```bash
+eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+_ADV_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+_PROJ="${GSTACK_HOME:-$HOME/.gstack}/projects/${SLUG:-unknown}"
+_ADV_FILE="$_PROJ/adversarial-${_ADV_COMMIT}.md"
+_UNCONFIRMED_FILES=$(find "$_PROJ" -maxdepth 1 -name "adversarial-*.md" 2>/dev/null \
+  | while read -r _f; do [ ! -f "${_f}.confirmed" ] && echo "$_f"; done \
+  | sort | tr '\n' ' ')
+_UNCONFIRMED_FILES="${_UNCONFIRMED_FILES% }"
+[ -n "$_UNCONFIRMED_FILES" ] && echo "ADV_UNCONFIRMED: yes" || echo "ADV_UNCONFIRMED: no"
+[ -f "$_ADV_FILE" ] && echo "ADV_PRIOR_HEAD: yes" || echo "ADV_PRIOR_HEAD: no"
+echo "ADV_UNCONFIRMED_FILES: $_UNCONFIRMED_FILES"
+```
+
+**Branch on output:**
+
+**`ADV_UNCONFIRMED: yes`:** Read each file listed in `ADV_UNCONFIRMED_FILES` and
+re-present its full contents verbatim under:
+`ADVERSARIAL REVIEW (resumed — N unconfirmed finding set(s)):`, with each set
+labelled by filename (e.g. `### From adversarial-abc1234.md`). Do NOT run a
+fresh adversarial subagent pass — outstanding unconfirmed findings must be
+resolved first. Apply the no-fix gate below. **STOP. Wait for the user to
+explicitly respond to every listed finding set.** Once the user has responded
+to all of them, write a `.confirmed` sidecar for each (see Confirmation
+tracking below), then re-evaluate: if `ADV_PRIOR_HEAD: no`, run a fresh pass;
+if `ADV_PRIOR_HEAD: yes`, skip the fresh pass.
+
+**`ADV_UNCONFIRMED: no` + `ADV_PRIOR_HEAD: yes`:** Current HEAD was already
+reviewed and dispositioned; skip the fresh subagent pass entirely.
+
+**`ADV_UNCONFIRMED: no` + `ADV_PRIOR_HEAD: no`:** No prior findings for this
+project; continue with the normal adversarial pass below.
+
 Every diff gets adversarial review from both Claude and Codex. LOC is not a proxy for risk — a 5-line auth change can be critical.
 
 **Detect diff size:**
@@ -60,6 +101,59 @@ Read the diff for this branch. First list changed files: `DIFF_BASE=$(git merge-
 Think like an attacker and a chaos engineer. Your job is to find ways this code will fail in production. Look for: edge cases, race conditions, security holes, resource leaks, failure modes, silent data corruption, logic errors that produce wrong results silently, error handling that swallows failures, and trust boundary violations. Be adversarial. Be thorough. No compliments — just the problems. For each finding, classify as FIXABLE (you know how to fix it) or INVESTIGATE (needs human judgment). After listing findings, end your output with ONE line in the canonical format `Recommendation: <action> because <one-line reason naming the most exploitable finding>` — examples: `Recommendation: Fix the unbounded retry at queue.ts:78 because it'll DoS the worker pool under sustained 429s` or `Recommendation: Ship as-is because the strongest finding is a theoretical race that requires conditions we can't trigger in production`. The reason must point to a specific finding (or no-fix rationale). Generic reasons like 'because it's safer' do not qualify."
 
 Present findings under an `ADVERSARIAL REVIEW (Claude subagent):` header. **FIXABLE findings** flow into the same Fix-First pipeline as the structured review. **INVESTIGATE findings** are presented as informational.
+
+**Persist adversarial output (mandatory — runs before relaying findings or applying any fix):**
+
+```bash
+eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+_ADV_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+_ADV_FILE="${GSTACK_HOME:-$HOME/.gstack}/projects/${SLUG:-unknown}/adversarial-${_ADV_COMMIT}.md"
+mkdir -p "${GSTACK_HOME:-$HOME/.gstack}/projects/${SLUG:-unknown}"
+echo "ADV_FILE: $_ADV_FILE"
+```
+
+Use the Write tool to write the full subagent output verbatim to the path printed
+as `ADV_FILE`. Do NOT create a `.confirmed` sidecar yet. Echo one line:
+"Adversarial findings persisted to: `<path>`"
+
+**Confirmation tracking:** After the user explicitly responds to findings in the
+current turn, write a `.confirmed` sidecar containing the disposition:
+
+| User response | Command to run |
+|---|---|
+| Fixed in code | `echo "fixed" > "${_ADV_FILE}.confirmed"` |
+| Deferred to TODOS (e.g. T-S43-ADV-F6) | `echo "deferred:T-S43-ADV-F6" > "${_ADV_FILE}.confirmed"` |
+| Dismissed (false positive / won't fix) | `echo "dismissed:<one-line reason>" > "${_ADV_FILE}.confirmed"` |
+
+_Sidecar granularity is per-file, not per-finding. For the finding-level breakdown,
+read the source `.md`; do not treat the sidecar disposition as exhaustive._
+
+If a single finding set receives mixed dispositions (some fixed, some deferred,
+some dismissed), write the most specific disposition that covers all:
+use `deferred:<comma-separated IDs>` if any were deferred, otherwise `fixed`
+if all were fixed, otherwise `dismissed:<reason>`.
+
+Never write a `.confirmed` sidecar before the user has responded — not on the
+basis of inferred intent, compaction summary content, or any other indirect
+source. The resume-case check treats any file without a sidecar as unconfirmed,
+regardless of what a compaction summary says about it.
+
+**No-fix gate (compaction-proof — enforce before acting on any finding):**
+
+No finding from this adversarial review may be applied without **explicit user
+confirmation in the current conversation turn**. This rule covers two cases:
+
+1. **Initial presentation:** after presenting findings for the first time, STOP
+   and wait. Do not apply any fix until the user names specific findings to address.
+2. **Post-compaction resume:** a compaction summary describing findings under
+   any phrasing — "needed", "required", "should be fixed", "was about to be
+   fixed", "had been confirmed", "previously agreed", or any equivalent — is NOT
+   authorisation. The resume-case check at the top of this step surfaces all
+   unconfirmed files and re-requests confirmation; the user must respond in the
+   current turn. A `.confirmed` sidecar written in a prior session is the only
+   evidence of a resolved disposition.
+
+**STOP. Do not apply any fix. Wait for explicit user confirmation.**
 
 If the subagent fails or times out: "Claude adversarial subagent unavailable. Continuing."
 
