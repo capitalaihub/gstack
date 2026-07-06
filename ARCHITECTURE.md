@@ -312,6 +312,12 @@ Three reasons:
 
 Tier 1 runs on every `bun test`. Tiers 2+3 are gated behind `EVALS=1`. The idea is: catch 95% of issues for free, use LLMs only for judgment calls.
 
+### Section files always resolve to the source repo, not the deployed copy
+
+**Confirmed 2026-07-06:** all 8 of `/ship`'s section files (`tests.md`, `test-coverage.md`, `plan-completion.md`, `review-army.md`, `greptile.md`, `adversarial.md`, `changelog.md`, `pr-body.md`) hardcode the gstack source repo path in every `STOP.` instruction — `~/.claude/skills/gstack/ship/sections/<name>.md` — not the deployed `~/.claude/skills/ship/sections/` copy that `setup`'s `link_claude_skill_dirs()` populates.
+
+This means the deployed `sections/` directory is dead weight for `/ship`'s execution: whatever `link_claude_skill_dirs()` copies there is never read. Real behavior always comes from the source repo, live, regardless of whether `./setup` has been re-run recently. A stale deployed `sections/` copy does not indicate stale `/ship` behavior — check the source repo directly instead.
+
 ## Command dispatch
 
 Commands are categorized by side effects:
